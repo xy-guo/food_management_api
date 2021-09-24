@@ -26,19 +26,28 @@ def random_filename():
 
 @auth.verify_password
 def get_password(username, password):
-    if username == 'xyguo' and password == 'xyguo':
-        return 'xyguo'
-    elif username == "rui" and password == 'rui':
-        return 'rui'
+    query = {"user": username}
+    result = list(mydb.users.find(query))
+    if len(result) <= 0:
+        return None
+    result = result[0]
+    print('checking ', username, password, result)
+    if result['password'] == password:
+        return username
     return None
 
 @auth.error_handler
 def unauthorized(error):
-    return jsonify({'error': 'Unauthorized access'}), 401
+    return jsonify({'error': 'Unauthorized access', 'code': 401}), 401
 
 @app.errorhandler(400)
 def handle_invalid_keys(error):
-    return jsonify({'error': str(error)}), 400
+    return jsonify({'error': str(error), 'code': 400}), 400
+
+@app.errorhandler(403)
+def handle_forbidden(error):
+    return jsonify({'error': str(error), 'code': 403}), 403
+
 
 def str2date(s):
     if s:
@@ -95,20 +104,53 @@ def index():
 #     print('msgs', msgs)
 #     return jsonify({"data": msgs})
 
-@app.route('/api/v1.0/db', methods=['DELETE'])
+
+@app.route('/api/v1.0/login', methods=['POST'])
 @auth.login_required
-def drop_db():
-    mydb.drop_collection('foods')
-    mydb.foods.drop()
+def login():
     return jsonify({'result': 'success'})
 
 
 @app.route('/api/v1.0/dbclean', methods=['POST'])
 @auth.login_required
 def clean_db():
-    query = { "$or": [{"name": re.compile("^(debug|测试)") }, {"useddate": {"$exists": False}}], "used": True}
+    query = {"user": auth.username(), "used": True}
     result = mydb.foods.delete_many(query)
     return jsonify({'result': 'success', 'deleted_count': result.deleted_count})
+
+
+@app.route('/api/v1.0/user', methods=['POST'])
+def new_user():
+    def check_user(user):
+        # a-z A-Z 0-9
+        reg = "^[A-Za-z\d]{4,32}$"
+        pat = re.compile(reg)
+        mat = re.search(pat, user)
+        return mat
+
+    def check_passwd(passwd):
+        # a-z A-Z 0-9 @$!%*#?& 
+        reg = "^(?=.*[a-zA-Z])(?=.*\d)(?=.*[@$!%*#?&])[A-Za-z\d@$!#%*?&]{8,32}$"
+        pat = re.compile(reg)
+        mat = re.search(pat, passwd)
+        return mat
+    
+    check_json_keys(request.json, ['user', 'password'], 'newuserrequest')
+    print(request.json)
+    user = request.json['user']
+    pwd = request.json['password']
+    if not check_user(user):
+        abort(400, description="wrong user format, must be in 4~32 length")
+    if not check_user(pwd):
+        abort(400, description="wrong password format, must include both characters and digits, at least 8 length")
+    try:
+        inserted_id = mydb.users.insert_one(dict(user=user, password=pwd)).inserted_id
+    except:
+        abort(400, description="repeated user")
+
+    print('return', {'result': 'success', '_id': inserted_id})
+    return jsonify({'result': 'success', '_id': str(inserted_id)})
+
 
 @app.route('/api/v1.0/food', methods=['POST'])
 @auth.login_required
@@ -119,6 +161,7 @@ def new_food():
     for idx, item in enumerate(request.json['foods']):
         check_json_keys(item, ['used', 'name', 'createdate', 'expiredate', 'type', 'imagename', 'createby'], 'fooditem-{}'.format(idx))
         foods.append(dict(
+            user=auth.username(),
             name=item['name'],
             type=item['type'],
             createdate=str2date(item['createdate']),
@@ -145,6 +188,7 @@ def update_food():
         check_json_keys(item, ['_id', 'name', 'createdate', 'expiredate', 'type', 'imagename', 'createby', 'used'], 'fooditem-{}'.format(idx))
         foods.append(dict(
             _id=ObjectId(item['_id']),
+            user=auth.username(),
             name=item['name'],
             type=item['type'],
             createdate=str2date(item['createdate']),
@@ -172,7 +216,7 @@ def update_food():
 def get_food():
     foods_db = mydb.foods
     foods = []
-    for food in foods_db.find():
+    for food in foods_db.find({"user": auth.username()}):
         foods.append(dict(
             _id=str(food['_id']),
             name=food['name'],
@@ -195,7 +239,7 @@ def delete_food():
     ids = request.json['_id']
     print('delete these ids', ids)
     assert isinstance(ids, list)
-    query = {"_id": {"$in": [ObjectId(x) for x in ids]}}
+    query = {"_id": {"$in": [ObjectId(x) for x in ids]}, "user": auth.username()}
     result = mydb.foods.delete_many(query)
     return jsonify({'result': 'success', 'deleted_count': result.deleted_count, 'failed_count': len(ids) - result.deleted_count})
 
@@ -259,6 +303,7 @@ def new_expire_info():
     for idx, item in enumerate(request.json['expireinfos']):
         check_json_keys(item, ['name', 'type', 'expireduration'], 'fooditem-{}'.format(idx))
         infos.append(dict(
+            user=auth.username(),
             name=item['name'],
             type=item['type'],
             expireduration=item['expireduration']
@@ -275,13 +320,24 @@ def new_expire_info():
 def get_expire_info():
     expireinfo_db = mydb.expireinfos
     expireinfos = []
-    for info in expireinfo_db.find():
+    for info in expireinfo_db.find({"user": auth.username()}):
         expireinfos.append(dict(
             name=info['name'],
             type=info['type'],
             expireduration=info['expireduration'],
         ))
     return jsonify({"data": expireinfos})
+
+@app.route('/api/v1.0/expireinfo', methods=['DELETE'])
+@auth.login_required
+def delete_expire_info():
+    check_json_keys(request.json, ['name'], 'delete_expire_request')
+    names = request.json['name']
+    print('delete these names', names)
+    assert isinstance(names, list)
+    query = {"name": {"$in": names}, "user": auth.username()}
+    result = mydb.expireinfos.delete_many(query)
+    return jsonify({'result': 'success', 'deleted_count': result.deleted_count, 'failed_count': len(names) - result.deleted_count})
 
 
 

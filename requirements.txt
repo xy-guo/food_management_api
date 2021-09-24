@@ -1,0 +1,4 @@
+pillow
+pymongo
+flask
+flask_httpauth
